@@ -99,6 +99,9 @@ const [analysisFeedback, setAnalysisFeedback] = useState<any>(null);
 
 const transcriptRef = useRef("");
 const analyzeAfterRecordingRef = useRef(false);
+const recognitionBaseTextRef = useRef("");
+const isStartingRecognitionRef = useRef(false);
+const finalRecognitionTextRef = useRef("");
 
   const [bookmarks, setBookmarks] = useState<string[]>([]);
   const [completed, setCompleted] = useState<string[]>([]);
@@ -530,10 +533,14 @@ const spinRoulette = () => {
       markCompleted(activeTopic);
     }
 
-    setTranscript("");
-    setSpeechMessage(
-      "Your learning session is complete. Now explain what you learned!"
-    );
+  transcriptRef.current = "";
+recognitionBaseTextRef.current = "";
+finalRecognitionTextRef.current = "";
+
+setTranscript("");
+setSpeechMessage(
+  "Your learning session is complete. Now explain what you learned!"
+);
 
     setPage("speak");
   };
@@ -599,9 +606,15 @@ const analyzeExplanation = async (spokenText: string) => {
 
 
 
+  
   // SPEECH RECOGNITION
   const startRecording = () => {
     if (typeof window === "undefined") return;
+
+    // Prevent multiple microphone sessions.
+    if (recognition.current || isStartingRecognitionRef.current) {
+      return;
+    }
 
     const SpeechRecognitionConstructor =
       (window as any).SpeechRecognition ||
@@ -611,11 +624,16 @@ const analyzeExplanation = async (spokenText: string) => {
       setSpeechMessage(
         "Speech recognition isn't supported in this browser. Try Chrome or Edge, or type your explanation below."
       );
-
       return;
     }
 
     try {
+      isStartingRecognitionRef.current = true;
+
+      // Preserve any text already entered by the user.
+      recognitionBaseTextRef.current = transcriptRef.current.trim();
+      finalRecognitionTextRef.current = "";
+
       const instance = new SpeechRecognitionConstructor();
 
       instance.continuous = true;
@@ -623,63 +641,92 @@ const analyzeExplanation = async (spokenText: string) => {
       instance.lang = "en-IN";
 
       instance.onresult = (event: any) => {
-        let finalText = "";
-        let interimText = "";
+  let finalText = "";
+  let interimText = "";
 
-        for (
-          let i = event.resultIndex;
-          i < event.results.length;
-          i++
-        ) {
-          const recognizedText =
-            event.results[i][0].transcript;
+  // Read the complete recognition results.
+  for (let i = 0; i < event.results.length; i++) {
+    const result = event.results[i];
+    const words = result[0]?.transcript?.trim();
 
-          if (event.results[i].isFinal) {
-            finalText += recognizedText + " ";
-          } else {
-            interimText += recognizedText;
-          }
-        }
+    if (!words) continue;
 
-        if (finalText) {
-  setTranscript((previous) => {
-    const updated = previous + finalText;
-    transcriptRef.current = updated;
-    return updated;
-  });
-}
+    if (result.isFinal) {
+      finalText += words + " ";
+    } else {
+      interimText += words + " ";
+    }
+  }
 
-        setSpeechMessage(
-          interimText
-            ? `Listening: ${interimText}`
-            : "Listening..."
-        );
-      };
+  // Save finalized speech separately.
+  finalRecognitionTextRef.current = finalText.trim();
+
+  const updatedTranscript = [
+    recognitionBaseTextRef.current,
+    finalRecognitionTextRef.current,
+    interimText.trim(),
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .trim();
+
+  transcriptRef.current = updatedTranscript;
+  setTranscript(updatedTranscript);
+
+  setSpeechMessage(
+    interimText.trim()
+      ? `Listening: ${interimText.trim()}`
+      : "Listening..."
+  );
+};
 
       instance.onerror = (event: any) => {
         setSpeechMessage(
           `Microphone error: ${event.error || "unknown error"}`
         );
-
         setRecording(false);
+        isStartingRecognitionRef.current = false;
       };
 
       instance.onend = () => {
+  isStartingRecognitionRef.current = false;
+
+  if (recognition.current === instance) {
+    recognition.current = null;
+  }
+
   setRecording(false);
+
+  // Keep the finalized speech when recording ends.
+  const updatedTranscript = [
+    recognitionBaseTextRef.current,
+    finalRecognitionTextRef.current,
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .trim();
+
+  transcriptRef.current = updatedTranscript;
+  setTranscript(updatedTranscript);
 
   if (analyzeAfterRecordingRef.current) {
     analyzeAfterRecordingRef.current = false;
-
-    analyzeExplanation(transcriptRef.current);
+    analyzeExplanation(updatedTranscript);
   }
 };
 
       recognition.current = instance;
       instance.start();
 
+      isStartingRecognitionRef.current = false;
+
       setRecording(true);
       setSpeechMessage("Listening... speak naturally.");
-    } catch {
+    } catch (error) {
+      isStartingRecognitionRef.current = false;
+      recognition.current = null;
+      setRecording(false);
+
       setSpeechMessage(
         "Unable to start microphone. Please try again."
       );
@@ -687,7 +734,9 @@ const analyzeExplanation = async (spokenText: string) => {
   };
 
   const stopRecording = () => {
-    recognition.current?.stop?.();
+    if (recognition.current) {
+      recognition.current.stop();
+    }
 
     setRecording(false);
 
@@ -695,6 +744,7 @@ const analyzeExplanation = async (spokenText: string) => {
       "Recording stopped. Review or edit your explanation."
     );
   };
+
 
   // QUIZ LOADING
   const loadQuiz = async () => {
@@ -1758,11 +1808,16 @@ const analyzeExplanation = async (spokenText: string) => {
                     words
                   </span>
 
-                  <button
-                    onClick={() => setTranscript("")}
-                  >
-                    Clear text
-                  </button>
+                 <button
+  onClick={() => {
+    transcriptRef.current = "";
+    recognitionBaseTextRef.current = "";
+    finalRecognitionTextRef.current = "";
+    setTranscript("");
+  }}
+>
+  Clear text
+</button>
                 </div>
               </div>
             </div>
