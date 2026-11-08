@@ -1,0 +1,15 @@
+{
+    "contents":  [
+                     {
+                         "parts":  [
+                                       {
+                                           "text":  "Return a JSON object containing ok: true"
+                                       }
+                                   ]
+                     }
+                 ],
+    "generationConfig":  {
+                             "maxOutputTokens":  50,
+                             "responseMimeType":  "application/json"
+                         }
+}

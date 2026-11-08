@@ -55,10 +55,30 @@ type Page = "home" | "learn" | "speak" | "quiz";
 export default function HomePage() {
   const [page, setPage] = useState<Page>("home");
 
-  const [topics, setTopics] = useState<Topic[]>([]);
-  const [category, setCategory] = useState("All");
-  const [loading, setLoading] = useState(true);
-  const [search, setSearch] = useState("");
+ const [topics, setTopics] = useState<Topic[]>([]);
+const [category, setCategory] = useState("All");
+const [loading, setLoading] = useState(true);
+const [search, setSearch] = useState("");
+
+const [apiPage, setApiPage] = useState(1);
+const [hasMoreTopics, setHasMoreTopics] = useState(false);
+const [loadingMoreTopics, setLoadingMoreTopics] = useState(false);
+const [discoveryPage, setDiscoveryPage] = useState(1);
+
+const TOPICS_PER_PAGE = 12;
+
+
+// Keep pagination data synchronised between async requests.
+const topicsRef = useRef<Topic[]>([]);
+const apiPageRef = useRef(1);
+const hasMoreTopicsRef = useRef(false);
+const loadingMoreTopicsRef = useRef(false);
+
+const categoryRef = useRef("All");
+const apiQueryRef = useRef("");
+const searchRef = useRef("");
+
+const loadRequestRef = useRef(0);
 
   const [spinning, setSpinning] = useState(false);
   const [rouletteTopic, setRouletteTopic] = useState<Topic | null>(null);
@@ -70,8 +90,15 @@ export default function HomePage() {
   const [timerRunning, setTimerRunning] = useState(false);
 
   const [transcript, setTranscript] = useState("");
-  const [recording, setRecording] = useState(false);
-  const [speechMessage, setSpeechMessage] = useState("");
+const [recording, setRecording] = useState(false);
+const [speechMessage, setSpeechMessage] = useState("");
+
+const [analysisLoading, setAnalysisLoading] = useState(false);
+const [analysisError, setAnalysisError] = useState("");
+const [analysisFeedback, setAnalysisFeedback] = useState<any>(null);
+
+const transcriptRef = useRef("");
+const analyzeAfterRecordingRef = useRef(false);
 
   const [bookmarks, setBookmarks] = useState<string[]>([]);
   const [completed, setCompleted] = useState<string[]>([]);
@@ -83,40 +110,158 @@ export default function HomePage() {
   const [quizScore, setQuizScore] = useState(0);
   const [quizFinished, setQuizFinished] = useState(false);
 
-  const spinInterval = useRef<ReturnType<typeof setInterval> | null>(null);
+  const spinTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+const [rouletteIndex, setRouletteIndex] = useState(0);
+const [carouselSpeed, setCarouselSpeed] = useState(65);
   const recognition = useRef<any>(null);
 
-  // LOAD TOPICS
+  
+  
+  // LOAD FIRST TOPIC BATCH
   const loadTopics = useCallback(
     async (selectedCategory: string, query = "") => {
+      const requestId = ++loadRequestRef.current;
+
+      categoryRef.current = selectedCategory;
+      apiQueryRef.current = query.trim();
+
+      topicsRef.current = [];
+      apiPageRef.current = 1;
+      hasMoreTopicsRef.current = false;
+      loadingMoreTopicsRef.current = false;
+
       setLoading(true);
+      setLoadingMoreTopics(false);
+      setTopics([]);
+      setApiPage(1);
+      setHasMoreTopics(false);
+      setDiscoveryPage(1);
 
       try {
         const params = new URLSearchParams({
           category: selectedCategory,
+          page: "1",
         });
 
         if (query.trim()) {
           params.set("q", query.trim());
         }
 
-        const response = await fetch(`/api/topics?${params.toString()}`);
+        const response = await fetch(`/api/topics?${params}`);
 
         if (!response.ok) {
           throw new Error("Unable to load topics");
         }
 
         const data = await response.json();
-        setTopics(data.topics || []);
+
+        // Ignore outdated requests after a category change.
+        if (requestId !== loadRequestRef.current) return;
+
+        const incoming: Topic[] = data.topics || [];
+
+        topicsRef.current = incoming;
+        apiPageRef.current = 1;
+        hasMoreTopicsRef.current = Boolean(data.hasMore);
+
+        setTopics(incoming);
+        setApiPage(1);
+        setHasMoreTopics(Boolean(data.hasMore));
       } catch (error) {
-        console.error("Topic loading error:", error);
-        setTopics([]);
+        if (requestId === loadRequestRef.current) {
+          console.error("Topic loading error:", error);
+
+          topicsRef.current = [];
+          hasMoreTopicsRef.current = false;
+
+          setTopics([]);
+          setHasMoreTopics(false);
+        }
       } finally {
-        setLoading(false);
+        if (requestId === loadRequestRef.current) {
+          setLoading(false);
+        }
       }
     },
     []
   );
+
+  // FETCH ANOTHER TOPIC BATCH
+  const loadMoreTopics = useCallback(async (): Promise<boolean> => {
+    if (
+      loadingMoreTopicsRef.current ||
+      !hasMoreTopicsRef.current
+    ) {
+      return false;
+    }
+
+    loadingMoreTopicsRef.current = true;
+    setLoadingMoreTopics(true);
+
+    const requestId = loadRequestRef.current;
+    const nextPage = apiPageRef.current + 1;
+
+    try {
+      const params = new URLSearchParams({
+        category: categoryRef.current,
+        page: String(nextPage),
+      });
+
+      if (apiQueryRef.current) {
+        params.set("q", apiQueryRef.current);
+      }
+
+      const response = await fetch(`/api/topics?${params}`);
+
+      if (!response.ok) {
+        throw new Error("Unable to load more topics");
+      }
+
+      const data = await response.json();
+
+      // Don't append results belonging to an old category.
+      if (requestId !== loadRequestRef.current) {
+        return false;
+      }
+
+      const incoming: Topic[] = data.topics || [];
+
+      const existingIds = new Set(
+        topicsRef.current.map((topic) => topic.id)
+      );
+
+      const newTopics = incoming.filter(
+        (topic) => !existingIds.has(topic.id)
+      );
+
+      const updatedTopics = [
+        ...topicsRef.current,
+        ...newTopics,
+      ];
+
+      topicsRef.current = updatedTopics;
+      apiPageRef.current = nextPage;
+      hasMoreTopicsRef.current = Boolean(data.hasMore);
+
+      setTopics(updatedTopics);
+      setApiPage(nextPage);
+      setHasMoreTopics(Boolean(data.hasMore));
+
+      return (
+        newTopics.length > 0 ||
+        Boolean(data.hasMore)
+      );
+    } catch (error) {
+      console.error("Additional topic loading error:", error);
+      return false;
+    } finally {
+      loadingMoreTopicsRef.current = false;
+      setLoadingMoreTopics(false);
+    }
+  }, []);
+
+
 
   // INITIAL LOAD AND LOCAL STORAGE
   useEffect(() => {
@@ -176,16 +321,17 @@ export default function HomePage() {
   }, [timerRunning, timeLeft, activeTopic]);
 
   // CLEANUP
-  useEffect(() => {
-    return () => {
-      if (spinInterval.current) {
-        clearInterval(spinInterval.current);
-      }
+useEffect(() => {
+  return () => {
+    if (spinTimeout.current) {
+      clearTimeout(spinTimeout.current);
+    }
 
-      recognition.current?.stop?.();
-    };
-  }, []);
+    recognition.current?.stop?.();
+  };
+}, []);
 
+ 
   // FILTER TOPICS
   const filteredTopics = useMemo(() => {
     if (!search.trim()) return topics;
@@ -194,6 +340,68 @@ export default function HomePage() {
       topic.title.toLowerCase().includes(search.toLowerCase())
     );
   }, [topics, search]);
+
+  // TODAY'S DISCOVERY PAGINATION
+  const totalDiscoveryPages = Math.max(
+    1,
+    Math.ceil(filteredTopics.length / TOPICS_PER_PAGE)
+  );
+
+  const visibleTopics = useMemo(() => {
+    const start = (discoveryPage - 1) * TOPICS_PER_PAGE;
+
+    return filteredTopics.slice(
+      start,
+      start + TOPICS_PER_PAGE
+    );
+  }, [filteredTopics, discoveryPage]);
+
+  // Navigate and fetch as many batches as necessary.
+  const goToDiscoveryPage = async (nextPage: number) => {
+    if (
+      nextPage < 1 ||
+      loadingMoreTopicsRef.current
+    ) {
+      return;
+    }
+
+    const requiredTopics = nextPage * TOPICS_PER_PAGE;
+
+    const getMatchingCount = () => {
+      const query = searchRef.current.trim().toLowerCase();
+
+      if (!query) {
+        return topicsRef.current.length;
+      }
+
+      return topicsRef.current.filter((topic) =>
+        topic.title.toLowerCase().includes(query)
+      ).length;
+    };
+
+    // Continue fetching until the requested page is available
+    // or the API sources have no more results.
+    while (
+      getMatchingCount() < requiredTopics &&
+      hasMoreTopicsRef.current
+    ) {
+      const success = await loadMoreTopics();
+
+      if (!success) break;
+    }
+
+    const matchingCount = getMatchingCount();
+
+    const availablePages = Math.max(
+      1,
+      Math.ceil(matchingCount / TOPICS_PER_PAGE)
+    );
+
+    setDiscoveryPage(
+      Math.min(nextPage, availablePages)
+    );
+  };
+
 
   // BOOKMARKS
   const toggleBookmark = (topic: Topic) => {
@@ -223,58 +431,78 @@ export default function HomePage() {
     );
   };
 
-  // RAPIDLEARN ROULETTE
-  const spinRoulette = () => {
-    if (spinning || topics.length === 0) return;
+  // RAPIDLEARN ROULETTE — CINEMATIC CAROUSEL
+const spinRoulette = () => {
+  if (spinning || topics.length === 0) return;
 
-    if (spinInterval.current) {
-      clearInterval(spinInterval.current);
+  if (spinTimeout.current) {
+    clearTimeout(spinTimeout.current);
+  }
+
+  setSpinning(true);
+  setRouletteTopic(null);
+
+  // Begin at a random position.
+  let currentIndex = Math.floor(
+    Math.random() * topics.length
+  );
+
+  setRouletteIndex(currentIndex);
+
+  // Fast initial movement.
+  let delay = 65;
+
+  // Number of carousel movements.
+  const maxTicks = 40 + Math.floor(Math.random() * 12);
+
+  let ticks = 0;
+
+  setCarouselSpeed(delay);
+
+  const animate = () => {
+    ticks++;
+
+    // Move to the next topic.
+    currentIndex = (currentIndex + 1) % topics.length;
+
+    setRouletteIndex(currentIndex);
+    setRouletteTopic(topics[currentIndex]);
+
+    // Gradually slow down near the end.
+    if (ticks > maxTicks - 12) {
+      delay += 32;
     }
 
-    setSpinning(true);
-    setRouletteTopic(null);
+    setCarouselSpeed(delay);
 
-    let ticks = 0;
-    let speed = 65;
+    if (ticks >= maxTicks) {
+      // Select the final winning topic.
+      const winnerIndex = Math.floor(
+        Math.random() * topics.length
+      );
 
-    const maxTicks = 32 + Math.floor(Math.random() * 15);
+      const winner = topics[winnerIndex];
 
-    const animate = () => {
-      const randomTopic =
-        topics[Math.floor(Math.random() * topics.length)];
+      setRouletteIndex(winnerIndex);
+      setRouletteTopic(winner);
+      setActiveTopic(winner);
 
-      setRouletteTopic(randomTopic);
-      ticks++;
+      // Allow the carousel to settle before showing the button.
+      setCarouselSpeed(600);
 
-      if (ticks >= maxTicks) {
-        if (spinInterval.current) {
-          clearInterval(spinInterval.current);
-          spinInterval.current = null;
-        }
-
-        const winner =
-          topics[Math.floor(Math.random() * topics.length)];
-
-        setRouletteTopic(winner);
-        setActiveTopic(winner);
+      spinTimeout.current = setTimeout(() => {
         setSpinning(false);
+        spinTimeout.current = null;
+      }, 650);
 
-        return;
-      }
+      return;
+    }
 
-      if (ticks > maxTicks - 8) {
-        speed += 28;
-
-        if (spinInterval.current) {
-          clearInterval(spinInterval.current);
-        }
-
-        spinInterval.current = setInterval(animate, speed);
-      }
-    };
-
-    spinInterval.current = setInterval(animate, speed);
+    spinTimeout.current = setTimeout(animate, delay);
   };
+
+  spinTimeout.current = setTimeout(animate, delay);
+};
 
   // START LEARNING
   const startLearning = (topic: Topic) => {
@@ -309,6 +537,67 @@ export default function HomePage() {
 
     setPage("speak");
   };
+
+
+// GEMINI AI TEACH-BACK ANALYSIS
+const analyzeExplanation = async (spokenText: string) => {
+  const explanation = spokenText.trim();
+
+  if (!activeTopic) {
+    setAnalysisError("No learning topic was selected.");
+    return;
+  }
+
+  if (explanation.split(/\s+/).filter(Boolean).length < 10) {
+    setAnalysisError(
+      "Please explain a little more before requesting your analysis."
+    );
+    return;
+  }
+
+  setAnalysisLoading(true);
+  setAnalysisError("");
+  setAnalysisFeedback(null);
+
+  try {
+    const response = await fetch("/api/analyze", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        topic: activeTopic.title,
+        description: activeTopic.description,
+        transcript: explanation,
+      }),
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(
+        data.error || "Unable to analyze your explanation."
+      );
+    }
+
+    if (!data.feedback) {
+      throw new Error("The AI returned an invalid feedback response.");
+    }
+
+    setAnalysisFeedback(data.feedback);
+    setSpeechMessage("Your learning analysis is ready!");
+  } catch (error) {
+    setAnalysisError(
+      error instanceof Error
+        ? error.message
+        : "Something went wrong during AI analysis."
+    );
+  } finally {
+    setAnalysisLoading(false);
+  }
+};
+
+
 
   // SPEECH RECOGNITION
   const startRecording = () => {
@@ -353,8 +642,12 @@ export default function HomePage() {
         }
 
         if (finalText) {
-          setTranscript((previous) => previous + finalText);
-        }
+  setTranscript((previous) => {
+    const updated = previous + finalText;
+    transcriptRef.current = updated;
+    return updated;
+  });
+}
 
         setSpeechMessage(
           interimText
@@ -372,8 +665,14 @@ export default function HomePage() {
       };
 
       instance.onend = () => {
-        setRecording(false);
-      };
+  setRecording(false);
+
+  if (analyzeAfterRecordingRef.current) {
+    analyzeAfterRecordingRef.current = false;
+
+    analyzeExplanation(transcriptRef.current);
+  }
+};
 
       recognition.current = instance;
       instance.start();
@@ -746,62 +1045,118 @@ export default function HomePage() {
               </div>
 
               <div className="roulette-display">
-                <div className="roulette-decoration decoration-a">
-                  ✦
-                </div>
 
-                <div className="roulette-decoration decoration-b">
-                  ✧
-                </div>
+  <div className="roulette-decoration decoration-a">
+    ✦
+  </div>
 
-                <div
-                  className={
-                    spinning
-                      ? "topic-ticket ticket-spinning"
-                      : "topic-ticket"
-                  }
-                >
-                  {rouletteTopic?.image ? (
-                    <img
-                      src={rouletteTopic.image}
-                      alt=""
-                    />
-                  ) : (
-                    <div className="ticket-placeholder">
-                      <Lightbulb size={42} />
-                    </div>
-                  )}
+  <div className="roulette-decoration decoration-b">
+    ✧
+  </div>
 
-                  <div className="ticket-overlay">
-                    <span>
-                      {rouletteTopic?.category ||
-                        "YOUR NEXT DISCOVERY"}
-                    </span>
+  {/* CAROUSEL */}
+  <div
+    className={`roulette-carousel ${
+      spinning ? "carousel-spinning" : ""
+    }`}
+    style={
+      {
+        "--carousel-speed": `${carouselSpeed}ms`,
+      } as CSSProperties
+    }
+  >
+    {topics.length > 0 &&
+      [-2, -1, 0, 1, 2].map((offset) => {
+        const index =
+          (rouletteIndex + offset + topics.length) %
+          topics.length;
 
-                    <h3>
-                      {loading && !rouletteTopic
-                        ? "Preparing discoveries..."
-                        : rouletteTopic?.title ||
-                          "What will you learn today?"}
-                    </h3>
+        const topic = topics[index];
 
-                    <p>
-                      {rouletteTopic?.description?.slice(0, 105) ||
-                        "A world of knowledge is just one spin away."}
-                    </p>
-                  </div>
-                </div>
+        const isCenter = offset === 0;
 
-                {rouletteTopic && !spinning && (
-                  <button
-                    className="ticket-open"
-                    onClick={() => openTopic(rouletteTopic)}
-                  >
-                    Open this topic
-                    <ArrowRight size={15} />
-                  </button>
-                )}
+        return (
+          <div
+            key={`${offset}-${topic.id}`}
+            className={[
+              "roulette-carousel-card",
+              `carousel-pos-${offset}`,
+              isCenter ? "carousel-center" : "",
+            ].join(" ")}
+          >
+            {topic.image ? (
+              <img
+                src={topic.image}
+                alt={topic.title}
+              />
+            ) : (
+              <div className="carousel-placeholder">
+                <Lightbulb size={42} />
               </div>
+            )}
+
+            <div className="carousel-card-overlay">
+              <span>{topic.category}</span>
+
+              <h3>{topic.title}</h3>
+
+              <p>
+                {topic.description?.slice(0, 85)}
+              </p>
+            </div>
+
+            {isCenter && (
+              <div className="carousel-selected-indicator">
+                <Sparkles size={14} />
+              </div>
+            )}
+          </div>
+        );
+      })}
+
+    {topics.length === 0 && (
+      <div className="carousel-empty">
+        <Lightbulb size={42} />
+        <p>Discoveries will appear here</p>
+      </div>
+    )}
+  </div>
+
+  {/* CAROUSEL STATUS */}
+  <div className="carousel-status">
+    {spinning ? (
+      <>
+        <LoaderCircle
+          size={14}
+          className="spin-icon"
+        />
+        Exploring the world of knowledge...
+      </>
+    ) : rouletteTopic ? (
+      <>
+        <Sparkles size={14} />
+        Your next discovery is ready!
+      </>
+    ) : (
+      <>
+        <Compass size={14} />
+        Your next discovery awaits
+      </>
+    )}
+  </div>
+
+  {/* WINNER BUTTON */}
+  {rouletteTopic && !spinning && (
+    <button
+      className="ticket-open"
+      onClick={() => openTopic(rouletteTopic)}
+    >
+      Explore this topic
+      <ArrowRight size={15} />
+    </button>
+  )}
+
+</div>
             </div>
           </section>
 
@@ -833,14 +1188,23 @@ export default function HomePage() {
 
               <input
                 value={search}
-                onChange={(event) =>
-                  setSearch(event.target.value)
-                }
+               onChange={(event) => {
+  const value = event.target.value;
+
+  searchRef.current = value;
+  setSearch(value);
+  setDiscoveryPage(1);
+}}
                 placeholder="Search for something fascinating..."
               />
 
               {search && (
-                <button onClick={() => setSearch("")}>
+                <button
+  onClick={() => {
+    setSearch("");
+    setDiscoveryPage(1);
+  }}
+>
                   <X size={16} />
                 </button>
               )}
@@ -867,7 +1231,7 @@ export default function HomePage() {
               </div>
             ) : (
               <div className="topic-grid">
-                {filteredTopics.slice(0, 12).map((topic, index) => (
+  {visibleTopics.map((topic, index) => (
                   <article
                     className="discovery-card"
                     key={topic.id}
@@ -930,6 +1294,63 @@ export default function HomePage() {
                 ))}
               </div>
             )}
+
+            {/* TODAY'S DISCOVERY PAGINATION */}
+<div className="discovery-pagination">
+  <button
+    className="pagination-button"
+    onClick={() => goToDiscoveryPage(discoveryPage - 1)}
+    disabled={discoveryPage === 1 || loadingMoreTopics}
+  >
+    <ArrowLeft size={15} />
+    Previous
+  </button>
+
+  <div className="pagination-pages">
+    {Array.from(
+      { length: totalDiscoveryPages },
+      (_, index) => index + 1
+    ).map((number) => (
+      <button
+        key={number}
+        className={
+          discoveryPage === number
+            ? "pagination-number active"
+            : "pagination-number"
+        }
+        onClick={() => goToDiscoveryPage(number)}
+        disabled={loadingMoreTopics}
+      >
+        {number}
+      </button>
+    ))}
+
+    {hasMoreTopics && (
+      <span className="pagination-more">…</span>
+    )}
+  </div>
+
+  <button
+    className="pagination-button"
+    onClick={() => goToDiscoveryPage(discoveryPage + 1)}
+    disabled={
+      loadingMoreTopics ||
+      (discoveryPage >= totalDiscoveryPages && !hasMoreTopics)
+    }
+  >
+    {loadingMoreTopics ? (
+      <LoaderCircle size={15} className="spin-icon" />
+    ) : (
+      <ArrowRight size={15} />
+    )}
+    {loadingMoreTopics ? "Loading" : "Next"}
+  </button>
+</div>
+
+<div className="discovery-page-info">
+  Showing {visibleTopics.length} of {filteredTopics.length} loaded topics
+  {hasMoreTopics ? " · More discoveries available" : " · No more API results"}
+</div>
           </section>
 
           {/* DAILY FACT */}
@@ -1319,9 +1740,10 @@ export default function HomePage() {
 
                 <textarea
                   value={transcript}
-                  onChange={(event) =>
-                    setTranscript(event.target.value)
-                  }
+                  onChange={(event) => {
+  transcriptRef.current = event.target.value;
+  setTranscript(event.target.value);
+}}
                   placeholder="Your spoken explanation will appear here. You can also type your explanation..."
                 />
 
@@ -1345,47 +1767,131 @@ export default function HomePage() {
               </div>
             </div>
 
-            <div className="feedback-placeholder">
-              <Sparkles size={20} />
+           
+{analysisLoading ? (
+  <div className="feedback-placeholder">
+    <LoaderCircle className="spin-icon" size={24} />
+    <div>
+      <b>Analyzing your explanation...</b>
+      <p>
+        Your AI learning coach is evaluating your understanding,
+        accuracy and knowledge gaps. This may take a few seconds.
+      </p>
+    </div>
+  </div>
+) : analysisError ? (
+  <div className="feedback-placeholder">
+    <Sparkles size={22} />
+    <div>
+      <b>Analysis couldn't be completed</b>
+      <p>{analysisError}</p>
+    </div>
+  </div>
+) : analysisFeedback ? (
+  <div className="feedback-placeholder">
+    <Sparkles size={22} />
+    <div>
+      <b>Your AI learning assessment</b>
 
-              <div>
-                <b>
-                  Coming next: Your personal learning coach
-                </b>
+      <h2>
+        {analysisFeedback.overallScore}/100
+      </h2>
 
-                <p>
-                  We'll connect a free local AI model to review
-                  your explanation, highlight what you
-                  understood, and gently suggest what to revisit.
-                </p>
-              </div>
-            </div>
+      <p>{analysisFeedback.summary}</p>
 
-            <div className="speak-actions">
-              <button
-                className="secondary-button"
-                onClick={() => {
-                  recognition.current?.stop?.();
-                  setRecording(false);
-                  setPage("home");
-                }}
-              >
-                Finish for now
-              </button>
+      <h3>Understanding</h3>
+      <p>{analysisFeedback.understandingScore}/100</p>
 
-              <button
-                className="primary-button"
-                onClick={() => {
-                  recognition.current?.stop?.();
-                  setRecording(false);
-                  setPage("home");
-                  setTranscript("");
-                }}
-              >
-                Done
-                <Check size={17} />
-              </button>
-            </div>
+      <h3>Factual accuracy</h3>
+      <p>{analysisFeedback.accuracyScore}/100</p>
+
+      <h3>Completeness</h3>
+      <p>{analysisFeedback.completenessScore}/100</p>
+
+      <h3>Clarity</h3>
+      <p>{analysisFeedback.clarityScore}/100</p>
+
+      <h3>What you explained well</h3>
+      {analysisFeedback.strengths?.map(
+        (item: string, index: number) => (
+          <p key={index}>✓ {item}</p>
+        )
+      )}
+
+      <h3>Things to correct</h3>
+      {analysisFeedback.corrections?.map(
+        (item: string, index: number) => (
+          <p key={index}>• {item}</p>
+        )
+      )}
+
+      <h3>Important points you missed</h3>
+      {analysisFeedback.missingPoints?.map(
+        (item: string, index: number) => (
+          <p key={index}>• {item}</p>
+        )
+      )}
+
+      <h3>Recommended next steps</h3>
+      {analysisFeedback.recommendations?.map(
+        (item: string, index: number) => (
+          <p key={index}>→ {item}</p>
+        )
+      )}
+
+      <h3>Your coach says</h3>
+      <p>{analysisFeedback.verdict}</p>
+    </div>
+  </div>
+) : (
+  <div className="feedback-placeholder">
+    <Sparkles size={20} />
+    <div>
+      <b>Your personal AI learning coach</b>
+      <p>
+        Complete your explanation and select Analyze My Explanation
+        to receive your personalized learning assessment.
+      </p>
+    </div>
+  </div>
+)}
+
+
+            
+<div className="speak-actions">
+  <button
+    className="secondary-button"
+    disabled={analysisLoading}
+    onClick={() => {
+      recognition.current?.stop?.();
+      analyzeAfterRecordingRef.current = false;
+      setRecording(false);
+      setPage("home");
+    }}
+  >
+    Finish for now
+  </button>
+
+  <button
+    className="primary-button"
+    disabled={recording || analysisLoading}
+    onClick={() => {
+      if (recording) return;
+
+      analyzeExplanation(transcriptRef.current);
+    }}
+  >
+    {analysisLoading ? (
+      <LoaderCircle className="spin-icon" size={17} />
+    ) : (
+      <Sparkles size={17} />
+    )}
+
+    {analysisLoading ? "Analyzing..." : "Analyze my explanation"}
+  </button>
+</div>
+
+
           </div>
         </section>
       )}
