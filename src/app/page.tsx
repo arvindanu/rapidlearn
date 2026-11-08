@@ -103,6 +103,10 @@ const recognitionBaseTextRef = useRef("");
 const isStartingRecognitionRef = useRef(false);
 const finalRecognitionTextRef = useRef("");
 
+const recognitionSegmentsRef = useRef<
+  Array<{ text: string; isFinal: boolean }>
+>([]);
+
   const [bookmarks, setBookmarks] = useState<string[]>([]);
   const [completed, setCompleted] = useState<string[]>([]);
 
@@ -632,7 +636,8 @@ const analyzeExplanation = async (spokenText: string) => {
 
       // Preserve any text already entered by the user.
       recognitionBaseTextRef.current = transcriptRef.current.trim();
-      finalRecognitionTextRef.current = "";
+finalRecognitionTextRef.current = "";
+recognitionSegmentsRef.current = [];
 
       const instance = new SpeechRecognitionConstructor();
 
@@ -641,30 +646,63 @@ const analyzeExplanation = async (spokenText: string) => {
       instance.lang = "en-IN";
 
       instance.onresult = (event: any) => {
-  let finalText = "";
-  let interimText = "";
+  const segments = recognitionSegmentsRef.current;
 
-  // Read the complete recognition results.
-  for (let i = 0; i < event.results.length; i++) {
+  // Update only the results that the browser has changed.
+  for (
+    let i = event.resultIndex;
+    i < event.results.length;
+    i++
+  ) {
     const result = event.results[i];
+
     const words = result[0]?.transcript?.trim();
 
     if (!words) continue;
 
-    if (result.isFinal) {
-      finalText += words + " ";
+    segments[i] = {
+      text: words,
+      isFinal: result.isFinal,
+    };
+  }
+
+  // Build the transcript from stored recognition segments.
+  const finalParts: string[] = [];
+  const interimParts: string[] = [];
+
+  let previousFinalSegment = "";
+
+  for (const segment of segments) {
+    if (!segment?.text) continue;
+
+    if (segment.isFinal) {
+      const normalized = segment.text
+        .toLowerCase()
+        .replace(/[^\p{L}\p{N}]+/gu, " ")
+        .trim();
+
+      // Prevent Android Chrome from adding the same
+      // finalized recognition segment twice.
+      if (normalized === previousFinalSegment) {
+        continue;
+      }
+
+      previousFinalSegment = normalized;
+      finalParts.push(segment.text);
     } else {
-      interimText += words + " ";
+      interimParts.push(segment.text);
     }
   }
 
-  // Save finalized speech separately.
-  finalRecognitionTextRef.current = finalText.trim();
+  const finalText = finalParts.join(" ").trim();
+  const interimText = interimParts.join(" ").trim();
+
+  finalRecognitionTextRef.current = finalText;
 
   const updatedTranscript = [
     recognitionBaseTextRef.current,
-    finalRecognitionTextRef.current,
-    interimText.trim(),
+    finalText,
+    interimText,
   ]
     .filter(Boolean)
     .join(" ")
@@ -674,8 +712,8 @@ const analyzeExplanation = async (spokenText: string) => {
   setTranscript(updatedTranscript);
 
   setSpeechMessage(
-    interimText.trim()
-      ? `Listening: ${interimText.trim()}`
+    interimText
+      ? `Listening: ${interimText}`
       : "Listening..."
   );
 };
@@ -688,7 +726,7 @@ const analyzeExplanation = async (spokenText: string) => {
         isStartingRecognitionRef.current = false;
       };
 
-      instance.onend = () => {
+     instance.onend = () => {
   isStartingRecognitionRef.current = false;
 
   if (recognition.current === instance) {
@@ -697,7 +735,6 @@ const analyzeExplanation = async (spokenText: string) => {
 
   setRecording(false);
 
-  // Keep the finalized speech when recording ends.
   const updatedTranscript = [
     recognitionBaseTextRef.current,
     finalRecognitionTextRef.current,
